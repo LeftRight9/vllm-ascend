@@ -1187,6 +1187,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         is_draft_cache = self._kimi_c8_enabled and is_draft_cache
         self.is_draft_cache = is_draft_cache
         self.kimi_c8_mode = self._kimi_c8_enabled and not is_draft_cache
+        transfer = self.vllm_config.kv_transfer_config
+        self.kimi_c8_prefill_nd = bool(
+            self.kimi_c8_mode
+            and getattr(ascend_config, "kimi_c8_prefill_nd", False)
+            and transfer is not None
+            and transfer.is_kv_producer
+            and not transfer.is_kv_consumer
+        )
         self.kimi_c8_static_fp8 = self.kimi_c8_mode
         if self.kimi_c8_mode:
             # Recipe C8 uses W8A8_MXFP8 projection weights plus a separate
@@ -2111,6 +2119,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         raw = kv_cache[0]
         pa_nz_prolog_view(raw)
         actual, num_decode = attn_metadata.num_actual_tokens, attn_metadata.num_decode_tokens
+        if getattr(self, "kimi_c8_prefill_nd", False) and num_decode:
+            raise RuntimeError("Kimi C8 ND cache is only supported for prefill-only producer steps")
         if actual == 0:
             return output.zero_()
         self._stage_gate(hidden_states, defer=self.dcp_enabled and num_decode > 0)
@@ -2146,7 +2156,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         if projection is None:
             writer = None
-            if is_graph:
+            if getattr(self, "kimi_c8_prefill_nd", False):
+                from vllm_ascend.device.kimi_c8_cache_write import write_static_fp8_nd_cache
+
+                writer = write_static_fp8_nd_cache
+            elif is_graph:
                 from vllm_ascend.device.kimi_c8_cache_write import write_static_fp8_cache_graph
 
                 writer = write_static_fp8_cache_graph
@@ -2383,7 +2397,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                         for i in range(iters)
                     )
                 )
-                history_plan = C8PrefillHistory.prepare(
+                history_type = C8PrefillHistory
+                if getattr(self, "kimi_c8_prefill_nd", False):
+                    from vllm_ascend.attention.kimi_c8_nd import C8NDHistory
+
+                    history_type = C8NDHistory
+                history_plan = history_type.prepare(
                     cache_kv_c, physical_table, torch.stack(lengths), torch.stack(starts)
                 )
                 prefill_metadata.c8_history_plans[key] = history_plan

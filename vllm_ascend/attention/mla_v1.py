@@ -323,6 +323,7 @@ class AscendMLAMetadata:
     c8_input_positions: torch.Tensor | None = None
     c8_step_cache: dict = field(default_factory=dict)
     c8_static_fp8: bool = False
+    offload_dummy: bool = False
     c8_query_start_loc_cpu: torch.Tensor | None = None
     external_flashmla_by_layout: dict[str, FlashMLADecode] | None = None
 
@@ -532,6 +533,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             decode=decode,
             attn_state=common.attn_state,
             causal=common.causal,
+            offload_dummy=common.offload_dummy,
             external_flashmla=flash,
             external_flashmla_by_layout=flash_by_layout,
         )
@@ -769,6 +771,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             ),
             c8_static_fp8=getattr(self, "kimi_c8_static_fp8", False),
             c8_query_start_loc_cpu=query_start_loc_cpu if self.kimi_c8_static_fp8 else None,
+            offload_dummy=common_attn_metadata.offload_dummy,
         )
         if self.pcp_enabled:
             assert expanded_slot_mapping is not None
@@ -2119,8 +2122,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         raw = kv_cache[0]
         pa_nz_prolog_view(raw)
         actual, num_decode = attn_metadata.num_actual_tokens, attn_metadata.num_decode_tokens
-        if getattr(self, "kimi_c8_prefill_nd", False) and num_decode:
-            raise RuntimeError("Kimi C8 ND cache is only supported for prefill-only producer steps")
         if actual == 0:
             return output.zero_()
         self._stage_gate(hidden_states, defer=self.dcp_enabled and num_decode > 0)

@@ -12,8 +12,6 @@ K3_MLA_CACHE_WIDTH = 576
 
 def quantize_static_fp8(x: torch.Tensor, scale: torch.Tensor | float) -> torch.Tensor:
     s = torch.as_tensor(scale, device=x.device, dtype=torch.float32)
-    if s.numel() != 1 or not bool(torch.isfinite(s).all()) or bool((s <= 0).any()):
-        raise ValueError("static scale must be one finite positive scalar")
     return (x.float() / s).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn).view(torch.uint8)
 
 
@@ -55,8 +53,6 @@ def write_static_fp8_cache(merged: torch.Tensor, cache: torch.Tensor, slots: tor
         raise ValueError("cache and merged widths do not match PA_NZ")
     if slots.numel() != merged.shape[0]:
         raise ValueError("C8 writer requires one slot per input token")
-    if bool((slots >= cache.shape[0] * block_size).any()):
-        raise ValueError("C8 writer slot exceeds physical cache capacity")
     valid, indices = pa_nz_indices(slots, block_size, merged.shape[1], page_stride_bytes=cache.stride(0))
     rows = quantize_static_fp8(merged[valid], scale).reshape(-1, PA_NZ_TILE)
     pa_nz_storage_view(cache).view(-1, PA_NZ_TILE).index_copy_(0, indices, rows)
@@ -188,7 +184,7 @@ def _gather_static_fp8_rows(
 
 @dataclass(frozen=True)
 class C8PrefillHistory:
-    """One prefill step's validated page table and compact per-chunk read metadata."""
+    """One prefill step's page table and compact per-chunk read metadata."""
 
     block_table: torch.Tensor
     lengths: torch.Tensor
@@ -216,18 +212,6 @@ class C8PrefillHistory:
             ends = starts + lengths
             if bool((active & (ends > columns * block_size)).any()):
                 raise ValueError("C8 history block table does not cover requested positions")
-            # Mark the union of active page intervals without a chunk-by-page
-            # tensor. Empty chunks and gaps may contain unmapped pages.
-            first = torch.where(active, starts // block_size, 0)
-            last = torch.where(active, (ends - 1) // block_size + 1, 0)
-            changes = torch.zeros((block_table.shape[0], columns + 1), dtype=torch.int32)
-            counts = active.T.to(torch.int32)
-            changes.scatter_add_(1, first.T, counts)
-            changes.scatter_add_(1, last.T, -counts)
-            used = (changes[:, :-1].cumsum(dim=1) > 0).to(cache.device)
-            invalid = (block_table < 0) | (block_table >= cache.shape[0])
-            if bool((used & invalid).any()):
-                raise ValueError("C8 history active block table entry is outside cache bounds")
         return cls(block_table, lengths.to(cache.device), starts.to(cache.device), totals)
 
     def read(

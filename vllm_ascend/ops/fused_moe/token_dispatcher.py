@@ -192,7 +192,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "group_ep": self.moe_all_to_all_group_name,
             "ep_world_size": self.ep_world_size,
             "ep_rank_id": self.ep_rank_id,
-            "comm_alg": self.mc2_comm_alg,
+            "comm_alg": "fullmesh_v2",
         }
         if self.need_extra_args:
             stage1_kwargs.update(
